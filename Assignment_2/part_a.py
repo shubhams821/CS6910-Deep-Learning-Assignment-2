@@ -55,9 +55,11 @@ class Mish(nn.Module):
     def forward(self, x):
         return x * torch.tanh(F.softplus(x))
 
+
 class CNN(pl.LightningModule):
     def __init__(self, input_shape, num_classes, num_filters=32, filter_size=(3, 3), activation='relu',
-                 dense_neurons=128, dropout_rate=0.2, data_augmentation=False, batch_norm=True):  # Added batch_norm parameter
+                 dense_neurons=128, dropout_rate=0.2, data_augmentation=False, batch_norm=True,
+                 filter_organization='same'):
         super().__init__()
         self.input_shape = input_shape
         self.num_classes = num_classes
@@ -67,7 +69,15 @@ class CNN(pl.LightningModule):
         self.dense_neurons = dense_neurons
         self.dropout_rate = dropout_rate
         self.data_augmentation = data_augmentation
-        self.batch_norm = batch_norm  # New parameter
+        self.batch_norm = batch_norm
+        self.filter_organization = filter_organization
+
+        # Define data augmentation transformations
+        self.data_augmentation_transforms = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(degrees=15),
+            # Add other desired transformations here
+        ])
 
         # Define the layers
         self.conv_layers = self._create_conv_layers()
@@ -76,13 +86,23 @@ class CNN(pl.LightningModule):
     def _create_conv_layers(self):
         layers = []
         in_channels = self.input_shape[0]
-        for out_channels in [self.num_filters, self.num_filters, self.num_filters, self.num_filters, self.num_filters]:
+        out_channels = self.num_filters
+
+        if self.filter_organization == 'double':
+            out_channels_list = [out_channels] + [out_channels * 2**i for i in range(1, 5)]
+        elif self.filter_organization == 'halve':
+            out_channels_list = [out_channels * 2**i for i in range(4, -1, -1)]
+        else:
+            out_channels_list = [out_channels] * 5
+
+        for out_channels in out_channels_list:
             layers.append(nn.Conv2d(in_channels, out_channels, self.filter_size, padding='same'))
             if self.batch_norm:
                 layers.append(nn.BatchNorm2d(out_channels))
             layers.append(self.get_activation())
             layers.append(nn.MaxPool2d(2))
             in_channels = out_channels
+
         return nn.Sequential(*layers)
 
     def _create_dense_layers(self):
@@ -96,6 +116,14 @@ class CNN(pl.LightningModule):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        if self.data_augmentation:
+            # Apply data augmentation to the input batch
+            augmented_batch = []
+            for image in x:
+                augmented_image = self.data_augmentation_transforms(image)
+                augmented_batch.append(augmented_image)
+            x = torch.stack(augmented_batch)
+
         x = self.conv_layers(x)
         x = self.dense_layers(x)
         return x
@@ -108,7 +136,7 @@ class CNN(pl.LightningModule):
         elif self.activation == 'silu':
             return nn.SiLU()
         elif self.activation == 'mish':
-            return Mish()  # Assuming you have implemented the Mish activation function
+            return Mish()
         else:
             raise ValueError("Invalid activation function specified.")
 
@@ -124,7 +152,6 @@ class CNN(pl.LightningModule):
         accuracy = (outputs.argmax(dim=1) == labels).float().mean()
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         self.log('train_accuracy', accuracy, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        # wandb.log({ "train_acc": accuracy, "train_loss": loss, "epoch": epoch+1})
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -132,12 +159,13 @@ class CNN(pl.LightningModule):
         outputs = self(images)
         loss = F.cross_entropy(outputs, labels)
         accuracy = (outputs.argmax(dim=1) == labels).float().mean()
-        self.log('train_loss', loss, on_epoch=True, prog_bar=True, logger=True)
-        self.log('train_accuracy', accuracy, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_loss', loss, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_accuracy', accuracy, on_epoch=True, prog_bar=True, logger=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
+
 
 sweep_config = {
     'method': 'random',  # Specify the search method
